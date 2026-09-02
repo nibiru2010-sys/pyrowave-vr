@@ -90,10 +90,10 @@ struct Encoder::Impl final : public WaveletBuffers
 
 	void init_block_meta() override;
 
-	size_t compute_num_packets(const void *meta, size_t packet_boundary) const;
-	size_t compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary) const;
+	size_t compute_num_packets(const void *meta, size_t packet_boundary, size_t padding_space) const;
+	size_t compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary, size_t padding_space) const;
 
-	size_t packetize(Packet *packets, size_t packet_boundary,
+	size_t packetize(Packet *packets, size_t packet_boundary, size_t padding_space,
 	                 void *bitstream, size_t size,
 	                 const void *mapped_meta, const void *mapped_bitstream) const;
 
@@ -597,7 +597,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 	return true;
 }
 
-size_t Encoder::Impl::compute_num_critical_packets(int bands, const void *meta_, size_t packet_boundary) const
+size_t Encoder::Impl::compute_num_critical_packets(int bands, const void *meta_, size_t packet_boundary, size_t padding_size) const
 {
 	auto *meta = static_cast<const BitstreamPacket *>(meta_);
 	size_t num_packets = 0;
@@ -613,9 +613,10 @@ size_t Encoder::Impl::compute_num_critical_packets(int bands, const void *meta_,
 		if (!packet_size)
 			continue;
 
-		if (size_in_packet + packet_size > packet_boundary)
+		if (size_in_packet + packet_size + padding_size > packet_boundary)
 		{
 			size_in_packet = 0;
+			padding_size = 0;
 			num_packets++;
 		}
 
@@ -628,9 +629,9 @@ size_t Encoder::Impl::compute_num_critical_packets(int bands, const void *meta_,
 	return num_packets;
 }
 
-size_t Encoder::Impl::compute_num_packets(const void *meta, size_t packet_boundary) const
+size_t Encoder::Impl::compute_num_packets(const void *meta, size_t packet_boundary, size_t padding_size) const
 {
-	return compute_num_critical_packets(-1, meta, packet_boundary);
+	return compute_num_critical_packets(-1, meta, packet_boundary, padding_size);
 }
 
 #if 0
@@ -1082,7 +1083,7 @@ bool Encoder::Impl::validate_bitstream(
 	return true;
 }
 
-size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
+size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary, size_t padding_size,
                                 void *output_bitstream_, size_t size,
                                 const void *mapped_meta,
                                 const void *mapped_bitstream) const
@@ -1125,11 +1126,12 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 		if (!packet_size)
 			continue;
 
-		if (size_in_packet + packet_size > packet_boundary)
+		if (size_in_packet + packet_size + padding_size > packet_boundary)
 		{
 			packets[num_packets++] = { packet_offset, size_in_packet };
 			size_in_packet = 0;
 			packet_offset = output_offset;
+			padding_size = 0;
 		}
 
 		assert(output_offset + packet_size <= size);
@@ -1272,21 +1274,22 @@ bool Encoder::encode_pre_transformed(Vulkan::CommandBuffer &cmd, const Bitstream
 	return impl->encode_pre_transformed(cmd, buffers, quant_scale);
 }
 
-size_t Encoder::compute_num_packets(const void *meta, size_t packet_boundary) const
+size_t Encoder::compute_num_packets(const void *meta, size_t packet_boundary, size_t padding_size) const
 {
-	return impl->compute_num_packets(meta, packet_boundary);
+	return impl->compute_num_packets(meta, packet_boundary, padding_size);
 }
 
-size_t Encoder::compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary) const
+size_t Encoder::compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary, size_t padding_size) const
 {
-	return impl->compute_num_critical_packets(bands, meta, packet_boundary);
+	return impl->compute_num_critical_packets(bands, meta, packet_boundary, padding_size);
 }
 
 size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
                           void *bitstream, size_t size,
-                          const void *mapped_meta, const void *mapped_bitstream) const
+                          const void *mapped_meta, const void *mapped_bitstream,
+                          size_t padding_size) const
 {
-	return impl->packetize(packets, packet_boundary, bitstream, size, mapped_meta, mapped_bitstream);
+	return impl->packetize(packets, packet_boundary, padding_size, bitstream, size, mapped_meta, mapped_bitstream);
 }
 
 void Encoder::report_stats(const void *, const void *) const

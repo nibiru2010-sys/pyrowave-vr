@@ -50,10 +50,15 @@ public:
 		size_t size;
 	};
 
-	size_t compute_num_packets(const void *mapped_meta, size_t packet_boundary) const;
+	// Padding size is used to reserve a certain number of bytes in the first packet for application defined scratch
+	// space. It only affects the first split point for packets.
+	// bitstream should still point to the start of data that is written by encoder,
+	// and size is the valid size of bitstream.
+	size_t compute_num_packets(const void *mapped_meta, size_t packet_boundary, size_t padding_size = 0) const;
 	size_t packetize(Packet *packets, size_t packet_boundary,
 					 void *bitstream, size_t size,
-					 const void *mapped_meta, const void *mapped_bitstream) const;
+					 const void *mapped_meta, const void *mapped_bitstream,
+					 size_t padding_size = 0) const;
 
 	// Debug
 	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
@@ -75,7 +80,7 @@ public:
 	// When using advanced model for error correction, queries the number of network packets which will contain
 	// "critically" encoded data. The first number of returned packets will correspond to these "critical" packets.
 	// It may be advantageous to add some FEC to these packets only, rather than error correcting the entire bitstream.
-	size_t compute_num_critical_packets(int bands, const void *mapped_meta, size_t packet_boundary) const;
+	size_t compute_num_critical_packets(int bands, const void *mapped_meta, size_t packet_boundary, size_t padding_size = 0) const;
 
 private:
 	struct Impl;
