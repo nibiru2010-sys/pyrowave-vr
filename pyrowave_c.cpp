@@ -1134,7 +1134,8 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 }
 
 pyrowave_result
-pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary, size_t *num_packets)
+pyrowave_encoder_compute_num_packets_with_padding(
+		pyrowave_encoder encoder, size_t packet_boundary, size_t padding_size, size_t *num_packets)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	if (encoder->queued_fence)
@@ -1143,14 +1144,44 @@ pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_bou
 	if (!encoder->queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
+	// This isn't really a "map". It just returns the persistently mapped pointer.
 	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
-	*num_packets = encoder->encoder.compute_num_packets(mapped_meta, packet_boundary);
+	*num_packets = encoder->encoder.compute_num_packets(mapped_meta, packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
 
 pyrowave_result
-pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary,
-                           size_t *out_packets, void *bitstream, size_t size)
+pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary, size_t *num_packets)
+{
+	return pyrowave_encoder_compute_num_packets_with_padding(encoder, packet_boundary, 0, num_packets);
+}
+
+pyrowave_result
+pyrowave_encoder_compute_num_critical_packets(
+		pyrowave_encoder encoder, int bands, size_t packet_boundary, size_t padding_size, size_t *num_packets)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	// Internal assertion.
+	if (bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (encoder->queued_fence)
+		encoder->queued_fence->wait();
+
+	if (!encoder->queued_meta)
+		return PYROWAVE_ERROR_GENERIC;
+
+	// This isn't really a "map". It just returns the persistently mapped pointer.
+	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	*num_packets = encoder->encoder.compute_num_critical_packets(bands, mapped_meta, packet_boundary, padding_size);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_packetize_with_padding(
+		pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary, size_t padding_size,
+		size_t *out_packets, void *bitstream, size_t size)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	if (encoder->queued_fence)
@@ -1164,9 +1195,67 @@ pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, s
 
 	*out_packets = encoder->encoder.packetize(
 		reinterpret_cast<Encoder::Packet *>(packets), packet_boundary, bitstream,
-		size, mapped_meta, mapped_bitstream);
+		size, mapped_meta, mapped_bitstream, padding_size);
 
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_get_mapped_raw_bitstream(
+		pyrowave_encoder encoder, const void **mapped_bitstream, size_t *mapped_bitstream_size,
+		const void **mapped_metadata, size_t *mapped_metadata_size)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	if (encoder->queued_fence)
+		encoder->queued_fence->wait();
+
+	if (!encoder->queued_meta || !encoder->queued_bitstream)
+		return PYROWAVE_ERROR_GENERIC;
+
+	*mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	*mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	*mapped_bitstream_size = encoder->queued_bitstream->get_create_info().size;
+	*mapped_metadata_size = encoder->queued_meta->get_create_info().size;
+
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_get_num_active_blocks(pyrowave_encoder encoder, int bands, size_t *num_active_blocks)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	if (bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	*num_active_blocks = encoder->encoder.get_num_active_blocks(bands);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder,
+		int bands, uint32_t *words, size_t word_count)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	if (bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (encoder->queued_fence)
+		encoder->queued_fence->wait();
+
+	if (!encoder->queued_meta)
+		return PYROWAVE_ERROR_GENERIC;
+
+	const void *mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	encoder->encoder.compute_block_active_words(bands, words, word_count, mapped_metadata);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary,
+						   size_t *out_packets, void *bitstream, size_t size)
+{
+	return pyrowave_encoder_packetize_with_padding(
+			encoder, packets, packet_boundary, 0, out_packets, bitstream, size);
 }
 
 void pyrowave_encoder_destroy(pyrowave_encoder encoder)
@@ -1246,6 +1335,15 @@ bool pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_parti
 {
 	Util::set_thread_logging_interface(&null_logger);
 	return decoder->decoder.decode_is_ready(allow_partial_frame);
+}
+
+bool pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
+		int num_pristine_bands, float minimum_packet_ratio,
+		const uint32_t *active_block_mask, size_t word_count)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	return decoder->decoder.decode_is_ready(allow_partial_frame, num_pristine_bands, minimum_packet_ratio,
+	                                        active_block_mask, word_count);
 }
 
 pyrowave_result
