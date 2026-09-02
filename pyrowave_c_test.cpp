@@ -5,6 +5,7 @@
 #include "pyrowave.h"
 #include <stdio.h>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <vector>
 
@@ -316,7 +317,11 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	CHECKED(pyrowave_encoder_compute_num_packets(encoder, 64 * 1024, &num_packets));
 	ASSERT_THAT(num_packets == 1);
 
+	CHECKED(pyrowave_encoder_compute_num_packets_with_padding(encoder, 64 * 1024, 64 * 1024 - 4, &num_packets));
+	ASSERT_THAT(num_packets == 2);
+
 	std::vector<uint8_t> bitstream(64 * 1024);
+	std::vector<uint8_t> bitstream_padded(64 * 1024);
 	pyrowave_packet packet = {};
 	CHECKED(pyrowave_encoder_packetize(encoder, &packet, 64 * 1024, &num_packets, bitstream.data(), bitstream.size()));
 	ASSERT_THAT(num_packets == 1);
@@ -325,12 +330,26 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	ASSERT_THAT(packet.size <= bitstream.size());
 	bitstream.resize(packet.size);
 
+	// Just padding on its own should not change the bitstream in any way if the splits don't happen.
+	CHECKED(pyrowave_encoder_packetize_with_padding(encoder, &packet, 64 * 1024, 16, &num_packets,
+		bitstream_padded.data(), bitstream_padded.size()));
+	ASSERT_THAT(num_packets == 1);
+	ASSERT_THAT(packet.offset == 0);
+	ASSERT_THAT(packet.size != 0);
+	ASSERT_THAT(packet.size <= bitstream_padded.size());
+	bitstream_padded.resize(packet.size);
+	ASSERT_THAT(packet.size == bitstream.size());
+	ASSERT_THAT(std::memcmp(bitstream.data(), bitstream_padded.data(), packet.size) == 0);
+
 	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
 	pyrowave_decoder_clear(decoder);
 	ASSERT_THAT(!pyrowave_decoder_decode_is_ready(decoder, false));
+	ASSERT_THAT(!pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
 	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
 
 	cpu_buffer.data[0] = &decode_luma[0][0];
 	cpu_buffer.data[1] = &decode_cb[0][0];
