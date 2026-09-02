@@ -41,7 +41,7 @@ public:
 	bool decode_is_ready(bool allow_partial_frame) const;
 
 	// A more refined version of decode_is_ready() that allows a bit more control.
-	// The default is num_pristine_bands = 1 (the final LL band) and minimum_packet_ratio = 0.9.
+	// The default is num_pristine_bands = 2 (the next-to-final LL band) and minimum_packet_ratio = 0.9.
 	// active_block_mask is an optional pointer.
 	// If bit i % 32 of active_block_mask[i / 32] is not set, then a missing block for that block index
 	// is ignored. This is intended to cover advanced cases for error correction.
