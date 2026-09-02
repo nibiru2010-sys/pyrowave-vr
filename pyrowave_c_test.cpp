@@ -8,6 +8,7 @@
 #include <cstring>
 #include <exception>
 #include <vector>
+#include <memory>
 
 // Smoke test the C API.
 
@@ -218,6 +219,118 @@ static void test_encode_cpu_buffer_validation(bool nv12)
 	pyrowave_device_destroy(info.device);
 }
 
+static void test_error_correction_api()
+{
+	pyrowave_device device;
+	CHECKED(pyrowave_create_default_device(&device));
+
+	constexpr int Width = 1920;
+	constexpr int Height = 1080;
+
+	pyrowave_decoder_create_info decoder_info = {};
+	decoder_info.device = device;
+	decoder_info.width = Width; // Test somewhat odd size. Quite relevant for fragment path as well.
+	decoder_info.height = Height;
+	decoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+
+	pyrowave_encoder_create_info encoder_info = {};
+	encoder_info.device = device;
+	encoder_info.width = Width;
+	encoder_info.height = Height;
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+
+	pyrowave_decoder decoder;
+	pyrowave_encoder encoder;
+	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+
+	std::unique_ptr<uint8_t[]> luma(new uint8_t[Width * Height]);
+	pyrowave_cpu_buffer cpu_buffer = {};
+
+	cpu_buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV420P;
+	cpu_buffer.row_stride_in_bytes[0] = Width;
+	cpu_buffer.row_stride_in_bytes[1] = Width / 2;
+	cpu_buffer.row_stride_in_bytes[2] = Width / 2;
+	cpu_buffer.plane_size_in_bytes[0] = Width * Height;
+	cpu_buffer.plane_size_in_bytes[1] = Width * Height / 4;
+	cpu_buffer.plane_size_in_bytes[2] = Width * Height / 4;
+	cpu_buffer.data[0] = luma.get();
+	cpu_buffer.data[1] = luma.get();
+	cpu_buffer.data[2] = luma.get();
+
+	const auto mirror = [](int value)
+	{
+		value &= 511;
+		if (value >= 256)
+			value = 511 - value;
+		return value;
+	};
+
+	for (int y = 0; y < Height; y++)
+		for (int x = 0; x < Width; x++)
+			luma[y * Width + x] = uint8_t(mirror(13 * x + 17 * y));
+
+	cpu_buffer.width = Width;
+	cpu_buffer.height = Height;
+	const pyrowave_rate_control rate_control = { 256 * 1024 };
+	CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control));
+
+	size_t num_packets;
+	CHECKED(pyrowave_encoder_compute_num_packets_with_padding(encoder, 4 * 1024, 2000, &num_packets));
+
+	std::vector<uint8_t> bitstream(256 * 1024);
+	std::vector<pyrowave_packet> packets(num_packets);
+	CHECKED(pyrowave_encoder_packetize_with_padding(encoder, packets.data(), 4 * 1024, 2000, &num_packets, bitstream.data(), bitstream.size()));
+	ASSERT_THAT(num_packets > 1);
+	ASSERT_THAT(packets[0].offset == 0);
+	ASSERT_THAT(packets[0].size < 4 * 1024 - 2000);
+	for (size_t i = 1; i < num_packets; i++)
+		ASSERT_THAT(packets[i].size <= 4 * 1024);
+
+	{
+		const void *mapped_bitstream = nullptr;
+		const void *mapped_meta = nullptr;
+		size_t mapped_bitstream_size = 0;
+		size_t mapped_metadata_size = 0;
+		CHECKED(pyrowave_encoder_get_mapped_raw_bitstream(encoder, &mapped_bitstream, &mapped_bitstream_size, &mapped_meta, &mapped_metadata_size));
+		ASSERT_THAT(mapped_bitstream);
+		ASSERT_THAT(mapped_meta);
+		ASSERT_THAT(mapped_bitstream_size == rate_control.maximum_bitstream_size + mapped_metadata_size);
+	}
+
+	// Test a theoretical situation.
+	for (int bands = 1; bands < 4; bands++)
+	{
+		size_t num_critical_packets;
+		size_t num_active_blocks;
+		CHECKED(pyrowave_encoder_get_num_active_blocks(encoder, bands, &num_active_blocks));
+
+		std::vector<uint32_t> active_words((num_active_blocks + 31) / 32);
+		CHECKED(pyrowave_encoder_compute_block_active_words(encoder, bands, active_words.data(), active_words.size()));
+
+		CHECKED(pyrowave_encoder_compute_num_critical_packets(encoder, bands, 4 * 1024, 2000, &num_critical_packets));
+
+		pyrowave_decoder_clear(decoder);
+
+		for (size_t i = 0; i < num_critical_packets; i++)
+		{
+			CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packets[i].offset, packets[i].size));
+			bool should_be_ready = i + 1 == num_critical_packets;
+			ASSERT_THAT(pyrowave_decoder_decode_is_ready_with_sideband(
+				decoder, true, bands, 0.0f,
+				active_words.data(), active_words.size()) == should_be_ready);
+
+			// If minimum packet ratio is large, we will fail due to that too.
+			ASSERT_THAT(!pyrowave_decoder_decode_is_ready_with_sideband(
+				decoder, true, bands, 0.5f,
+				active_words.data(), active_words.size()));
+		}
+	}
+
+	pyrowave_decoder_destroy(decoder);
+	pyrowave_encoder_destroy(encoder);
+}
+
 static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode, pyrowave_chroma_subsampling chroma)
 {
 	if (chroma == PYROWAVE_CHROMA_SUBSAMPLING_444 && nv12_encode)
@@ -343,13 +456,13 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 
 	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
-	ASSERT_THAT(pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready_with_sideband(decoder, false, 4, 0.0f, nullptr, 0));
 	pyrowave_decoder_clear(decoder);
 	ASSERT_THAT(!pyrowave_decoder_decode_is_ready(decoder, false));
-	ASSERT_THAT(!pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
+	ASSERT_THAT(!pyrowave_decoder_decode_is_ready_with_sideband(decoder, false, 4, 0.0f, nullptr, 0));
 	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
-	ASSERT_THAT(pyrowave_decoder_decode_is_ready2(decoder, false, 4, 0.0f, nullptr, 0));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready_with_sideband(decoder, false, 4, 0.0f, nullptr, 0));
 
 	cpu_buffer.data[0] = &decode_luma[0][0];
 	cpu_buffer.data[1] = &decode_cb[0][0];
@@ -579,6 +692,8 @@ int main()
 			(variant & 1) != 0, (variant & 2) != 0,
 			(variant & 4) != 0 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420);
 	}
+
+	test_error_correction_api();
 
 	// Validate that we handle error inputs gracefully.
 	printf("Running error handling tests ...\n");
