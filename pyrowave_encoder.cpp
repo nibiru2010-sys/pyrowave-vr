@@ -91,6 +91,7 @@ struct Encoder::Impl final : public WaveletBuffers
 	void init_block_meta() override;
 
 	size_t compute_num_packets(const void *meta, size_t packet_boundary) const;
+	size_t compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary) const;
 
 	size_t packetize(Packet *packets, size_t packet_boundary,
 	                 void *bitstream, size_t size,
@@ -100,6 +101,9 @@ struct Encoder::Impl final : public WaveletBuffers
 	void analyze_alternative_packing(const void *mapped_meta, const void *mapped_bitstream) const;
 
 	bool validate_bitstream(const uint32_t *bitstream_u32, const BitstreamPacket *meta, uint32_t block_index) const;
+
+	size_t get_num_active_blocks(int bands) const;
+	void compute_block_active_words(int bands, uint32_t *words, size_t word_count, const void *mapped_meta) const;
 
 	uint32_t sequence_count = 0;
 };
@@ -593,7 +597,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 	return true;
 }
 
-size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_boundary) const
+size_t Encoder::Impl::compute_num_critical_packets(int bands, const void *meta_, size_t packet_boundary) const
 {
 	auto *meta = static_cast<const BitstreamPacket *>(meta_);
 	size_t num_packets = 0;
@@ -601,7 +605,9 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 
 	size_in_packet += sizeof(BitstreamSequenceHeader);
 
-	for (int i = 0; i < block_count_32x32; i++)
+	int block_count = bands >= 0 ? int(get_num_active_blocks(bands)) : block_count_32x32;
+
+	for (int i = 0; i < block_count; i++)
 	{
 		size_t packet_size = meta[i].num_words * sizeof(uint32_t);
 		if (!packet_size)
@@ -620,6 +626,11 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 		num_packets++;
 
 	return num_packets;
+}
+
+size_t Encoder::Impl::compute_num_packets(const void *meta, size_t packet_boundary) const
+{
+	return compute_num_critical_packets(-1, meta, packet_boundary);
 }
 
 #if 0
@@ -957,6 +968,32 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 }
 #endif
 
+void Encoder::Impl::compute_block_active_words(int bands, uint32_t *words, size_t word_count, const void *mapped_meta) const
+{
+	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+	memset(words, 0, sizeof(uint32_t) * word_count);
+
+	size_t num_active_blocks = get_num_active_blocks(bands);
+	assert(word_count * 32 >= num_active_blocks);
+
+	for (size_t i = 0; i < num_active_blocks; i++)
+		if (meta[i].num_words)
+			words[i / 32] |= 1u << (i % 32);
+}
+
+size_t Encoder::Impl::get_num_active_blocks(int bands) const
+{
+	assert(bands < DecompositionLevels);
+	if (bands <= 0)
+		return 0;
+
+	int last_subband = bands == 1 ? 0 : 3;
+	int last_band = bands - 1;
+
+	auto &meta = block_meta[NumComponents - 1][DecompositionLevels - std::max<int>(1, last_band)][last_subband];
+	return meta.block_offset_32x32 + meta.block_count_32x32;
+}
+
 bool Encoder::Impl::validate_bitstream(
 		const uint32_t *bitstream_u32, const BitstreamPacket *meta, uint32_t block_index) const
 {
@@ -1240,6 +1277,11 @@ size_t Encoder::compute_num_packets(const void *meta, size_t packet_boundary) co
 	return impl->compute_num_packets(meta, packet_boundary);
 }
 
+size_t Encoder::compute_num_critical_packets(int bands, const void *meta, size_t packet_boundary) const
+{
+	return impl->compute_num_critical_packets(bands, meta, packet_boundary);
+}
+
 size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
                           void *bitstream, size_t size,
                           const void *mapped_meta, const void *mapped_bitstream) const
@@ -1255,6 +1297,16 @@ void Encoder::report_stats(const void *, const void *) const
 uint64_t Encoder::get_meta_required_size() const
 {
 	return impl->block_count_32x32 * sizeof(BitstreamPacket);
+}
+
+size_t Encoder::get_num_active_blocks(int bands) const
+{
+	return impl->get_num_active_blocks(bands);
+}
+
+void Encoder::compute_block_active_words(int bands, uint32_t *words, size_t word_count, const void *mapped_meta) const
+{
+	impl->compute_block_active_words(bands, words, word_count, mapped_meta);
 }
 
 Encoder::~Encoder()
