@@ -37,9 +37,12 @@ option(PYROWAVE_DEVEL "Build PyroWave as a standalone sandbox with development t
 option(PYROWAVE_UTILS "Build PyroWave with extra runtime tooling." OFF)
 
 if (ANDROID)
-    # Mobile chips really like FP16
-    target_compile_definitions(pyrowave PRIVATE PYROWAVE_PRECISION=0)
-    message("Forcing FP16 default on Android.")
+    # Mobile chips really like FP16, but allow overriding for validation
+    # (the C test's 1-ULP round-trip bound requires >= FP32 math) and for
+    # precision/speed benchmarking.
+    set(PYROWAVE_ANDROID_PRECISION "0" CACHE STRING "Precision level on Android: 0=FP16, 1=FP32 math, 2=FP32 storage")
+    target_compile_definitions(pyrowave PRIVATE PYROWAVE_PRECISION=${PYROWAVE_ANDROID_PRECISION})
+    message("Using PYROWAVE_PRECISION=${PYROWAVE_ANDROID_PRECISION} on Android.")
 else()
     option(PYROWAVE_FP32_STORAGE "Configure for full FP32 and extended precision." OFF)
     option(PYROWAVE_FP32_MATH "Configure for FP32 arithmetic, but reduced range storage." ON)
@@ -124,6 +127,11 @@ target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
 if (${PROJECT_IS_TOP_LEVEL})
     add_library(pyrowave-shared SHARED pyrowave_c.cpp pyrowave.h)
     target_link_libraries(pyrowave-shared PRIVATE pyrowave granite-vulkan)
+    if (ANDROID)
+        # Granite logging calls __android_log_print; console builds do not get
+        # liblog implicitly (the Gradle/AGP path does).
+        target_link_libraries(pyrowave-shared PRIVATE log)
+    endif()
     target_compile_definitions(pyrowave-shared PRIVATE PYROWAVE_EXPORT_SYMBOLS)
     target_compile_options(pyrowave-shared PRIVATE ${PYROWAVE_CXX_FLAGS})
 
@@ -134,10 +142,16 @@ if (${PROJECT_IS_TOP_LEVEL})
     add_executable(pyrowave-c-interop-test pyrowave_c_interop_test.cpp com_ptr.hpp)
     target_link_libraries(pyrowave-c-interop-test PRIVATE pyrowave-shared granite-vulkan)
     target_compile_options(pyrowave-c-interop-test PRIVATE ${PYROWAVE_CXX_FLAGS})
+    if (ANDROID)
+        target_link_libraries(pyrowave-c-interop-test PRIVATE log)
+    endif()
 
     add_executable(pyrowave-device-validation pyrowave_device_validation.cpp com_ptr.hpp)
     target_link_libraries(pyrowave-device-validation PRIVATE pyrowave-shared granite-util granite-volk-headers)
     target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
+    if (ANDROID)
+        target_link_libraries(pyrowave-device-validation PRIVATE log)
+    endif()
 
     set(PYROWAVE_API_VERSION_MAJOR 0)
     set(PYROWAVE_API_VERSION_MINOR 5)
