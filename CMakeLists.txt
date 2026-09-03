@@ -153,6 +153,10 @@ if (${PROJECT_IS_TOP_LEVEL})
         target_link_libraries(pyrowave-device-validation PRIVATE log)
     endif()
 
+    add_executable(pyrowave-decode-bench pyrowave_decode_bench.cpp)
+    target_link_libraries(pyrowave-decode-bench PRIVATE pyrowave-shared granite-volk-headers)
+    target_compile_options(pyrowave-decode-bench PRIVATE ${PYROWAVE_CXX_FLAGS})
+
     set(PYROWAVE_API_VERSION_MAJOR 0)
     set(PYROWAVE_API_VERSION_MINOR 5)
     set(PYROWAVE_API_VERSION_PATCH 0)
